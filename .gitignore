@@ -1,0 +1,13 @@
+__pycache__/
+*.py[cod]
+env/
+.venv/
+venv/
+.vs/
+*.suo
+*.user
+*.xlsx
+!samples/*.xlsx
+.vscode/settings.json
+samples/*.pptx
+samples/*.xlsx
