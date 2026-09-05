@@ -82,6 +82,7 @@ class OrgNode:
     height: Optional[int] = None
 
     slide_title: str = ""
+    prefer_title: bool = False       # وضع الوظائف: المسمى الوظيفي هو التسمية الأساسية
 
     @property
     def center(self) -> Optional[Tuple[float, float]]:
@@ -97,7 +98,9 @@ class OrgNode:
 
     @property
     def display_name(self) -> str:
-        return self.name or self.title or self.raw_text.replace("\n", " ").strip()
+        primary, secondary = ((self.title, self.name) if self.prefer_title
+                              else (self.name, self.title))
+        return primary or secondary or self.raw_text.replace("\n", " ").strip()
 
 
 @dataclass
@@ -234,6 +237,57 @@ def normalise_key(value: str) -> str:
     return _WS.sub(" ", re.sub(r"[^\w؀-ۿ ]+", " ", value)).strip()
 
 
+def parse_position_text(raw: str, smart: bool = True) -> Dict[str, str]:
+    """وضع الوظائف: المربع يمثّل وظيفة لا شخصًا.
+
+    السطر الأول هو المسمى الوظيفي، والسطر الذي يشبه اسم قسم يذهب إلى
+    `department`، وأي اسم شخص (إن وُجد) يوضع في `name` كـ «شاغل الوظيفة».
+    """
+    lines = split_lines(raw)
+    out = {"name": "", "title": "", "department": "", "extra": ""}
+    if not lines:
+        return out
+
+    if len(lines) == 1:
+        pair = _split_inline(lines[0])
+        if pair:
+            left, right = pair
+            if smart and _looks_like_title(right) and not _looks_like_title(left):
+                title, other = right, left
+            else:
+                title, other = left, right
+            out["title"] = title
+            if _looks_like_department(other):
+                out["department"] = other
+            else:
+                out["name"] = other
+        else:
+            out["title"] = lines[0]
+        return out
+
+    # عدة أسطر: ابحث عن السطر الذي يشبه مسمى وظيفي ليكون الوظيفة
+    title_idx = 0
+    if smart and not _looks_like_title(lines[0]):
+        for idx, line in enumerate(lines[1:], start=1):
+            if _looks_like_title(line) and not _looks_like_department(line):
+                title_idx = idx
+                break
+
+    out["title"] = lines[title_idx]
+    rest: List[str] = []
+    for idx, line in enumerate(lines):
+        if idx == title_idx:
+            continue
+        if not out["department"] and _looks_like_department(line):
+            out["department"] = line
+        elif not out["name"] and not _looks_like_title(line):
+            out["name"] = line              # شاغل الوظيفة إن كُتب داخل المربع
+        else:
+            rest.append(line)
+    out["extra"] = " | ".join(rest)
+    return out
+
+
 # ==========================================================================
 #  3) قراءة العرض التقديمي  -  Extraction (SmartArt / shapes / tables)
 # ==========================================================================
@@ -292,6 +346,13 @@ class Transform:
                          self.sx * sx, self.sy * sy)
 
 
+def _parse_fields(text: str, smart_text: bool, positions: bool) -> Dict[str, str]:
+    """وضع الوظائف (الافتراضي) أو وضع الموظفين."""
+    if positions:
+        return parse_position_text(text, smart=smart_text)
+    return parse_box_text(text, smart=smart_text)
+
+
 def _q(tag: str) -> str:
     prefix, local = tag.split(":")
     return "{%s}%s" % (NS[prefix], local)
@@ -329,7 +390,8 @@ def _dgm_point_text(pt) -> str:
 
 
 def _extract_smartart(shape, slide_index: int, prefix: str,
-                      result: ExtractionResult, smart_text: bool) -> int:
+                      result: ExtractionResult, smart_text: bool,
+                      positions: bool = True) -> int:
     part = _diagram_data_part(shape)
     if part is None:
         return 0
@@ -350,10 +412,10 @@ def _extract_smartart(shape, slide_index: int, prefix: str,
         text = _dgm_point_text(pt)
         node_id = f"{prefix}sa{added + 1}"
         model_ids[model_id] = node_id
-        fields = parse_box_text(text, smart=smart_text)
+        fields = _parse_fields(text, smart_text, positions)
         result.nodes.append(OrgNode(
             node_id=node_id, slide_index=slide_index, source="smartart",
-            raw_text=text, **fields,
+            raw_text=text, prefer_title=positions, **fields,
         ))
         added += 1
 
@@ -462,11 +524,11 @@ def _collect_shapes(shapes, slide_index: int, prefix: str, tr: Transform,
 
             counter[0] += 1
             node_id = f"{prefix}sh{counter[0]}"
-            fields = parse_box_text(text, smart=opts.smart_text)
+            fields = _parse_fields(text, opts.smart_text, opts.positions)
             result.nodes.append(OrgNode(
                 node_id=node_id, slide_index=slide_index, source="shape",
                 raw_text=text, left=left, top=top, width=width, height=height,
-                **fields,
+                prefer_title=opts.positions, **fields,
             ))
             try:
                 id_map[int(shape.shape_id)] = node_id
@@ -556,13 +618,16 @@ def _edges_from_geometry(nodes: List[OrgNode]) -> List[Tuple[str, str]]:
 HEADER_HINTS = {
     "name": ["name", "employee", "الاسم", "اسم", "الموظف"],
     "title": ["title", "position", "job", "role", "المسمى", "الوظيفة", "المنصب", "الوظيفي"],
+    # في وضع الوظائف قد يُكتب عمود الارتباط باسم «الوظيفة الأعلى» أو «ترتبط بـ»
     "department": ["department", "dept", "division", "unit", "القسم", "الإدارة", "الادارة", "وحدة"],
-    "manager": ["manager", "reports to", "supervisor", "parent", "المدير", "يتبع", "المشرف", "الرئيس المباشر"],
+    "manager": ["manager", "reports to", "supervisor", "parent", "المدير", "يتبع", "المشرف",
+                "الرئيس المباشر", "الوظيفة الأعلى", "ترتبط", "تتبع", "الجهة الأعلى"],
 }
 
 
 def _extract_table(shape, slide_index: int, prefix: str,
-                   result: ExtractionResult, smart_text: bool) -> int:
+                   result: ExtractionResult, smart_text: bool,
+                   positions: bool = True) -> int:
     table = shape.table
     rows = [[clean_text(c.text) for c in row.cells] for row in table.rows]
     if len(rows) < 2:
@@ -577,16 +642,19 @@ def _extract_table(shape, slide_index: int, prefix: str,
                 break
     body = rows[1:]
     if not cols:                       # no recognisable header -> positional
-        cols = {"name": 0}
+        cols = {"title": 0} if positions else {"name": 0}
         if len(rows[0]) > 1:
-            cols["title"] = 1
+            cols["name" if positions else "title"] = 1
         if len(rows[0]) > 2:
             cols["manager"] = 2
         body = rows
+    if positions and "title" not in cols and "name" in cols:
+        cols["title"] = cols.pop("name")   # عمود واحد فقط -> يُعتبر مسمى وظيفي
 
     added = 0
     pending: List[Tuple[str, str]] = []          # (child node id, manager text)
-    by_name: Dict[str, str] = {}
+    by_key: Dict[str, str] = {}                  # المسمى الوظيفي (أو الاسم) -> المعرّف
+    by_alt: Dict[str, str] = {}                  # الحقل الآخر، لمطابقة عمود الارتباط
     for row in body:
         def cell(key: str) -> str:
             idx = cols.get(key)
@@ -599,17 +667,21 @@ def _extract_table(shape, slide_index: int, prefix: str,
         node_id = f"{prefix}tb{added}"
         result.nodes.append(OrgNode(
             node_id=node_id, slide_index=slide_index, source="table",
-            raw_text=" | ".join(v for v in row if v),
+            raw_text=" | ".join(v for v in row if v), prefer_title=positions,
             name=name, title=title, department=cell("department"),
         ))
-        if name:
-            by_name.setdefault(normalise_key(name), node_id)
+        key, alt = ((title, name) if positions else (name, title))
+        if key:
+            by_key.setdefault(normalise_key(key), node_id)
+        if alt:
+            by_alt.setdefault(normalise_key(alt), node_id)
         manager = cell("manager")
         if manager:
             pending.append((node_id, manager))
 
     for child_id, manager in pending:
-        parent_id = by_name.get(normalise_key(manager))
+        wanted = normalise_key(manager)
+        parent_id = by_key.get(wanted) or by_alt.get(wanted)
         if parent_id and parent_id != child_id:
             result.edges.append((parent_id, child_id))
     return added
@@ -621,11 +693,13 @@ def _extract_table(shape, slide_index: int, prefix: str,
 class ExtractOptions:
     def __init__(self, include_titles: bool = False, use_tables: bool = True,
                  smart_text: bool = True, infer_geometry: bool = True,
-                 max_text_len: int = 300, slides: Optional[Iterable[int]] = None):
+                 max_text_len: int = 300, slides: Optional[Iterable[int]] = None,
+                 positions: bool = True):
         self.include_titles = include_titles
         self.use_tables = use_tables
         self.smart_text = smart_text
         self.infer_geometry = infer_geometry
+        self.positions = positions      # True = هيكل وظائف، False = هيكل موظفين
         self.max_text_len = max_text_len
         self.slides = set(slides) if slides else None
         self.slide_width = 0
@@ -651,7 +725,8 @@ def extract_from_presentation(path: str, options: Optional[ExtractOptions] = Non
         for shape in slide.shapes:
             if shape._element.tag == _q("p:graphicFrame") and \
                     shape._element.find(".//" + _q("dgm:relIds")) is not None:
-                _extract_smartart(shape, index, prefix, result, opts.smart_text)
+                _extract_smartart(shape, index, prefix, result, opts.smart_text,
+                                  opts.positions)
 
         # 2) tables
         if opts.use_tables:
@@ -661,7 +736,8 @@ def extract_from_presentation(path: str, options: Optional[ExtractOptions] = Non
                 except Exception:
                     has_table = False
                 if has_table:
-                    _extract_table(shape, index, prefix, result, opts.smart_text)
+                    _extract_table(shape, index, prefix, result, opts.smart_text,
+                                   opts.positions)
 
         # 3) shapes + connectors
         id_map, connectors = _collect_shapes(slide.shapes, index, prefix,
@@ -796,7 +872,26 @@ LEVEL_FILLS = ["DDEBF7", "E2EFDA", "FFF2CC", "FCE4D6", "EDEDED", "F2F2F2"]
 THIN = Side(style="thin", color="BFBFBF")
 BORDER = Border(left=THIN, right=THIN, top=THIN, bottom=THIN)
 
-COLUMNS: Sequence[tuple] = (
+# أعمدة وضع الوظائف (الافتراضي): المربع = وظيفة
+COLUMNS_POSITIONS: Sequence[tuple] = (
+    ("م", 6),
+    ("الشريحة", 9),
+    ("عنوان الشريحة", 22),
+    ("المستوى", 9),
+    ("المسمى الوظيفي", 30),
+    ("شاغل الوظيفة (إن وُجد)", 22),
+    ("القسم / الإدارة", 22),
+    ("الوظيفة الأعلى", 30),
+    ("وظائف تابعة مباشرة", 16),
+    ("إجمالي الوظائف التابعة", 18),
+    ("المسار الوظيفي", 46),
+    ("المصدر", 12),
+    ("المعرّف", 12),
+    ("النص الأصلي", 40),
+)
+
+# أعمدة وضع الموظفين: المربع = شخص
+COLUMNS_EMPLOYEES: Sequence[tuple] = (
     ("م", 6),
     ("الشريحة", 9),
     ("عنوان الشريحة", 22),
@@ -828,8 +923,9 @@ def _style_header(ws: Worksheet, widths: Sequence[tuple], rtl: bool) -> None:
 
 
 def _write_main_sheet(ws: Worksheet, nodes: List[OrgNode], by_id: Dict[str, OrgNode],
-                      rtl: bool) -> None:
-    _style_header(ws, COLUMNS, rtl)
+                      rtl: bool, positions: bool = True) -> None:
+    columns = COLUMNS_POSITIONS if positions else COLUMNS_EMPLOYEES
+    _style_header(ws, columns, rtl)
     for row_idx, node in enumerate(nodes, start=2):
         parent = by_id.get(node.parent_id) if node.parent_id else None
         values = [
@@ -837,8 +933,8 @@ def _write_main_sheet(ws: Worksheet, nodes: List[OrgNode], by_id: Dict[str, OrgN
             node.slide_index,
             node.slide_title,
             node.level,
-            node.name,
-            node.title,
+            node.title if positions else node.name,
+            node.name if positions else node.title,
             node.department,
             parent.display_name if parent else "",
             node.direct_reports,
@@ -860,12 +956,15 @@ def _write_main_sheet(ws: Worksheet, nodes: List[OrgNode], by_id: Dict[str, OrgN
             if col_idx in (5, 6) and node.level == 1:
                 cell.font = Font(bold=True)
     if len(nodes):
-        ws.auto_filter.ref = f"A1:{get_column_letter(len(COLUMNS))}{len(nodes) + 1}"
+        ws.auto_filter.ref = f"A1:{get_column_letter(len(columns))}{len(nodes) + 1}"
 
 
-def _write_tree_sheet(ws: Worksheet, nodes: List[OrgNode], rtl: bool) -> None:
-    cols = (("المستوى", 9), ("الهيكل الشجري", 60), ("المسمى الوظيفي", 28),
-            ("القسم / الإدارة", 22), ("عدد المرؤوسين", 14))
+def _write_tree_sheet(ws: Worksheet, nodes: List[OrgNode], rtl: bool,
+                      positions: bool = True) -> None:
+    second = ("شاغل الوظيفة", 24) if positions else ("المسمى الوظيفي", 28)
+    cols = (("المستوى", 9), ("الهيكل الشجري", 60), second,
+            ("القسم / الإدارة", 22),
+            ("وظائف تابعة" if positions else "عدد المرؤوسين", 14))
     _style_header(ws, cols, rtl)
     for row_idx, node in enumerate(nodes, start=2):
         indent = max(node.level - 1, 0)
@@ -875,7 +974,7 @@ def _write_tree_sheet(ws: Worksheet, nodes: List[OrgNode], rtl: bool) -> None:
         cell.alignment = Alignment(indent=indent * 2, horizontal="right" if rtl else "left")
         if node.level == 1:
             cell.font = Font(bold=True)
-        ws.cell(row=row_idx, column=3, value=node.title)
+        ws.cell(row=row_idx, column=3, value=node.name if positions else node.title)
         ws.cell(row=row_idx, column=4, value=node.department)
         ws.cell(row=row_idx, column=5, value=node.direct_reports).alignment = \
             Alignment(horizontal="center")
@@ -887,7 +986,7 @@ def _write_tree_sheet(ws: Worksheet, nodes: List[OrgNode], rtl: bool) -> None:
 
 
 def _write_summary_sheet(ws: Worksheet, nodes: List[OrgNode], result: ExtractionResult,
-                         rtl: bool) -> None:
+                         rtl: bool, positions: bool = True) -> None:
     _style_header(ws, (("البيان", 34), ("القيمة", 58)), rtl)
     levels = {}
     departments = {}
@@ -900,10 +999,11 @@ def _write_summary_sheet(ws: Worksheet, nodes: List[OrgNode], result: Extraction
         ("ملف العرض التقديمي", result.source_file),
         ("تاريخ التحويل", datetime.now().strftime("%Y-%m-%d %H:%M")),
         ("عدد الشرائح المستخدمة", ", ".join(str(s) for s in result.slides_used()) or "-"),
-        ("إجمالي عدد الوظائف", len(nodes)),
+        ("نوع الهيكل", "هيكل وظائف" if positions else "هيكل موظفين"),
+        ("إجمالي عدد الوظائف" if positions else "إجمالي عدد الموظفين", len(nodes)),
         ("عدد المستويات الإدارية", max(levels) if levels else 0),
-        ("عدد الوظائف في القمة (بدون مدير)", sum(1 for n in nodes if n.parent_id is None)),
-        ("عدد الوظائف بدون مرؤوسين", sum(1 for n in nodes if n.direct_reports == 0)),
+        ("عدد الوظائف في القمة (بلا وظيفة أعلى)", sum(1 for n in nodes if n.parent_id is None)),
+        ("عدد الوظائف بلا وظائف تابعة", sum(1 for n in nodes if n.direct_reports == 0)),
     ]
     for level in sorted(levels):
         rows.append((f"عدد الوظائف في المستوى {level}", levels[level]))
@@ -923,17 +1023,17 @@ def _write_summary_sheet(ws: Worksheet, nodes: List[OrgNode], result: Extraction
 
 
 def export_to_excel(nodes: List[OrgNode], result: ExtractionResult, output_path: str,
-                    rtl: bool = True) -> str:
+                    rtl: bool = True, positions: bool = True) -> str:
     """Create the workbook (3 sheets) and return the path it was saved to."""
     wb = Workbook()
     by_id = {n.node_id: n for n in nodes}
 
     main_ws = wb.active
     main_ws.title = "الهيكل الوظيفي"
-    _write_main_sheet(main_ws, nodes, by_id, rtl)
+    _write_main_sheet(main_ws, nodes, by_id, rtl, positions)
 
-    _write_tree_sheet(wb.create_sheet("العرض الشجري"), nodes, rtl)
-    _write_summary_sheet(wb.create_sheet("ملخص وتقرير"), nodes, result, rtl)
+    _write_tree_sheet(wb.create_sheet("العرض الشجري"), nodes, rtl, positions)
+    _write_summary_sheet(wb.create_sheet("ملخص وتقرير"), nodes, result, rtl, positions)
 
     wb.save(output_path)
     return output_path
@@ -955,7 +1055,8 @@ def convert(pptx_path: str,
             use_tables: bool = True,
             smart_text: bool = True,
             infer_geometry: bool = True,
-            rtl: bool = True) -> Tuple[str, List[OrgNode], ExtractionResult]:
+            rtl: bool = True,
+            positions: bool = True) -> Tuple[str, List[OrgNode], ExtractionResult]:
     """Convert one presentation and return (excel path, nodes, extraction result)."""
     if not os.path.isfile(pptx_path):
         raise FileNotFoundError(f"لم يتم العثور على الملف: {pptx_path}")
@@ -968,6 +1069,7 @@ def convert(pptx_path: str,
         smart_text=smart_text,
         infer_geometry=infer_geometry,
         slides=slides,
+        positions=positions,
     )
     result = extract_from_presentation(pptx_path, options)
     nodes = build_hierarchy(result)
@@ -985,7 +1087,7 @@ def convert(pptx_path: str,
     if directory:
         os.makedirs(directory, exist_ok=True)
 
-    export_to_excel(nodes, result, output, rtl=rtl)
+    export_to_excel(nodes, result, output, rtl=rtl, positions=positions)
     return output, nodes, result
 
 
@@ -1034,6 +1136,8 @@ def build_parser() -> argparse.ArgumentParser:
                         help="عدم استخدام الذكاء في فصل الاسم عن المسمى الوظيفي")
     parser.add_argument("--no-geometry", action="store_true",
                         help="عدم استنتاج التسلسل من مواقع المربعات عند غياب خطوط الربط")
+    parser.add_argument("--employees", action="store_true",
+                        help="اعتبار المربعات أشخاصًا (موظفين) بدل الوظائف")
     parser.add_argument("--ltr", action="store_true",
                         help="إخراج ملف إكسل باتجاه من اليسار لليمين")
     parser.add_argument("--tree", action="store_true", help="طباعة الهيكل في الشاشة بعد التحويل")
@@ -1045,8 +1149,10 @@ def build_parser() -> argparse.ArgumentParser:
 def print_tree(nodes: List[OrgNode]) -> None:
     for node in nodes:
         prefix = "    " * (node.level - 1) + ("└── " if node.level > 1 else "")
-        title = f" ({node.title})" if node.title and node.name else ""
-        print(f"{prefix}{node.display_name}{title}")
+        # في وضع الوظائف يظهر شاغل الوظيفة بين قوسين، وفي وضع الموظفين يظهر المسمى
+        secondary = node.name if node.prefer_title else node.title
+        extra = f" ({secondary})" if secondary and secondary != node.display_name else ""
+        print(f"{prefix}{node.display_name}{extra}")
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -1072,6 +1178,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             smart_text=not args.no_smart_text,
             infer_geometry=not args.no_geometry,
             rtl=not args.ltr,
+            positions=not args.employees,
         )
     except Exception as exc:
         print(f"[خطأ] {exc}", file=sys.stderr)
@@ -1082,7 +1189,8 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     if not args.quiet:
         levels = max((n.level for n in nodes), default=0)
-        print(f"عدد الوظائف المستخرجة : {len(nodes)}")
+        label = "عدد الموظفين المستخرجين" if args.employees else "عدد الوظائف المستخرجة"
+        print(f"{label} : {len(nodes)}")
         print(f"عدد المستويات الإدارية: {levels}")
         for warning in result.warnings:
             print(f"  - تنبيه: {warning}")
@@ -1109,6 +1217,7 @@ class ConverterApp:
         self.smart_var = tk.BooleanVar(value=True)
         self.geom_var = tk.BooleanVar(value=True)
         self.rtl_var = tk.BooleanVar(value=True)
+        self.positions_var = tk.BooleanVar(value=True)
 
         self._build()
         if initial_file:
@@ -1142,6 +1251,8 @@ class ConverterApp:
             .grid(row=1, column=2, sticky="w", **pad)
         ttk.Checkbutton(options, text="اتجاه الإكسل من اليمين لليسار", variable=self.rtl_var)\
             .grid(row=2, column=0, sticky="w", **pad)
+        ttk.Checkbutton(options, text="هيكل وظائف (وليس موظفين)", variable=self.positions_var)\
+            .grid(row=2, column=1, sticky="w", **pad)
 
         actions = ttk.Frame(self.root)
         actions.pack(fill="x", **pad)
@@ -1207,6 +1318,7 @@ class ConverterApp:
                 smart_text=self.smart_var.get(),
                 infer_geometry=self.geom_var.get(),
                 rtl=self.rtl_var.get(),
+                positions=self.positions_var.get(),
             )
             self.xlsx_var.set(output)
             self.write(f"عدد الوظائف المستخرجة: {len(nodes)}")

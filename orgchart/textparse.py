@@ -116,3 +116,54 @@ def normalise_key(value: str) -> str:
     value = value.replace("أ", "ا").replace("إ", "ا").replace("آ", "ا")
     value = value.replace("ة", "ه").replace("ى", "ي")
     return _WS.sub(" ", re.sub(r"[^\w؀-ۿ ]+", " ", value)).strip()
+
+
+def parse_position_text(raw: str, smart: bool = True) -> Dict[str, str]:
+    """وضع الوظائف: المربع يمثّل وظيفة لا شخصًا.
+
+    السطر الأول هو المسمى الوظيفي، والسطر الذي يشبه اسم قسم يذهب إلى
+    `department`، وأي اسم شخص (إن وُجد) يوضع في `name` كـ «شاغل الوظيفة».
+    """
+    lines = split_lines(raw)
+    out = {"name": "", "title": "", "department": "", "extra": ""}
+    if not lines:
+        return out
+
+    if len(lines) == 1:
+        pair = _split_inline(lines[0])
+        if pair:
+            left, right = pair
+            if smart and _looks_like_title(right) and not _looks_like_title(left):
+                title, other = right, left
+            else:
+                title, other = left, right
+            out["title"] = title
+            if _looks_like_department(other):
+                out["department"] = other
+            else:
+                out["name"] = other
+        else:
+            out["title"] = lines[0]
+        return out
+
+    # عدة أسطر: ابحث عن السطر الذي يشبه مسمى وظيفي ليكون الوظيفة
+    title_idx = 0
+    if smart and not _looks_like_title(lines[0]):
+        for idx, line in enumerate(lines[1:], start=1):
+            if _looks_like_title(line) and not _looks_like_department(line):
+                title_idx = idx
+                break
+
+    out["title"] = lines[title_idx]
+    rest: List[str] = []
+    for idx, line in enumerate(lines):
+        if idx == title_idx:
+            continue
+        if not out["department"] and _looks_like_department(line):
+            out["department"] = line
+        elif not out["name"] and not _looks_like_title(line):
+            out["name"] = line              # شاغل الوظيفة إن كُتب داخل المربع
+        else:
+            rest.append(line)
+    out["extra"] = " | ".join(rest)
+    return out

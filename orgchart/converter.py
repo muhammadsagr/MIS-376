@@ -23,7 +23,8 @@ def convert(pptx_path: str,
             use_tables: bool = True,
             smart_text: bool = True,
             infer_geometry: bool = True,
-            rtl: bool = True) -> Tuple[str, List[OrgNode], ExtractionResult]:
+            rtl: bool = True,
+            positions: bool = True) -> Tuple[str, List[OrgNode], ExtractionResult]:
     """Convert one presentation and return (excel path, nodes, extraction result)."""
     if not os.path.isfile(pptx_path):
         raise FileNotFoundError(f"لم يتم العثور على الملف: {pptx_path}")
@@ -36,6 +37,7 @@ def convert(pptx_path: str,
         smart_text=smart_text,
         infer_geometry=infer_geometry,
         slides=slides,
+        positions=positions,
     )
     result = extract_from_presentation(pptx_path, options)
     nodes = build_hierarchy(result)
@@ -53,5 +55,5 @@ def convert(pptx_path: str,
     if directory:
         os.makedirs(directory, exist_ok=True)
 
-    export_to_excel(nodes, result, output, rtl=rtl)
+    export_to_excel(nodes, result, output, rtl=rtl, positions=positions)
     return output, nodes, result

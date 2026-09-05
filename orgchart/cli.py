@@ -51,6 +51,8 @@ def build_parser() -> argparse.ArgumentParser:
                         help="عدم استخدام الذكاء في فصل الاسم عن المسمى الوظيفي")
     parser.add_argument("--no-geometry", action="store_true",
                         help="عدم استنتاج التسلسل من مواقع المربعات عند غياب خطوط الربط")
+    parser.add_argument("--employees", action="store_true",
+                        help="اعتبار المربعات أشخاصًا (موظفين) بدل الوظائف")
     parser.add_argument("--ltr", action="store_true",
                         help="إخراج ملف إكسل باتجاه من اليسار لليمين")
     parser.add_argument("--tree", action="store_true", help="طباعة الهيكل في الشاشة بعد التحويل")
@@ -62,8 +64,10 @@ def build_parser() -> argparse.ArgumentParser:
 def print_tree(nodes: List[OrgNode]) -> None:
     for node in nodes:
         prefix = "    " * (node.level - 1) + ("└── " if node.level > 1 else "")
-        title = f" ({node.title})" if node.title and node.name else ""
-        print(f"{prefix}{node.display_name}{title}")
+        # في وضع الوظائف يظهر شاغل الوظيفة بين قوسين، وفي وضع الموظفين يظهر المسمى
+        secondary = node.name if node.prefer_title else node.title
+        extra = f" ({secondary})" if secondary and secondary != node.display_name else ""
+        print(f"{prefix}{node.display_name}{extra}")
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -90,6 +94,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             smart_text=not args.no_smart_text,
             infer_geometry=not args.no_geometry,
             rtl=not args.ltr,
+            positions=not args.employees,
         )
     except Exception as exc:
         print(f"[خطأ] {exc}", file=sys.stderr)
@@ -100,7 +105,8 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     if not args.quiet:
         levels = max((n.level for n in nodes), default=0)
-        print(f"عدد الوظائف المستخرجة : {len(nodes)}")
+        label = "عدد الموظفين المستخرجين" if args.employees else "عدد الوظائف المستخرجة"
+        print(f"{label} : {len(nodes)}")
         print(f"عدد المستويات الإدارية: {levels}")
         for warning in result.warnings:
             print(f"  - تنبيه: {warning}")

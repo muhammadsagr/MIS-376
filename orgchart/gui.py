@@ -28,6 +28,7 @@ class ConverterApp:
         self.smart_var = tk.BooleanVar(value=True)
         self.geom_var = tk.BooleanVar(value=True)
         self.rtl_var = tk.BooleanVar(value=True)
+        self.positions_var = tk.BooleanVar(value=True)
 
         self._build()
         if initial_file:
@@ -61,6 +62,8 @@ class ConverterApp:
             .grid(row=1, column=2, sticky="w", **pad)
         ttk.Checkbutton(options, text="اتجاه الإكسل من اليمين لليسار", variable=self.rtl_var)\
             .grid(row=2, column=0, sticky="w", **pad)
+        ttk.Checkbutton(options, text="هيكل وظائف (وليس موظفين)", variable=self.positions_var)\
+            .grid(row=2, column=1, sticky="w", **pad)
 
         actions = ttk.Frame(self.root)
         actions.pack(fill="x", **pad)
@@ -126,6 +129,7 @@ class ConverterApp:
                 smart_text=self.smart_var.get(),
                 infer_geometry=self.geom_var.get(),
                 rtl=self.rtl_var.get(),
+                positions=self.positions_var.get(),
             )
             self.xlsx_var.set(output)
             self.write(f"عدد الوظائف المستخرجة: {len(nodes)}")

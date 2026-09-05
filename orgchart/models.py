@@ -35,6 +35,7 @@ class OrgNode:
     height: Optional[int] = None
 
     slide_title: str = ""
+    prefer_title: bool = False       # وضع الوظائف: المسمى الوظيفي هو التسمية الأساسية
 
     @property
     def center(self) -> Optional[Tuple[float, float]]:
@@ -50,7 +51,9 @@ class OrgNode:
 
     @property
     def display_name(self) -> str:
-        return self.name or self.title or self.raw_text.replace("\n", " ").strip()
+        primary, secondary = ((self.title, self.name) if self.prefer_title
+                              else (self.name, self.title))
+        return primary or secondary or self.raw_text.replace("\n", " ").strip()
 
 
 @dataclass

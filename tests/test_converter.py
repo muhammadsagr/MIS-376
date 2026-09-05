@@ -93,10 +93,26 @@ class ConnectorChartTests(unittest.TestCase):
         sheet = wb[wb.sheetnames[0]]
         self.assertEqual(sheet.max_row, 8)                      # 7 rows + header
         headers = [c.value for c in sheet[1]]
-        self.assertIn("الاسم", headers)
-        manager_col = headers.index("المدير المباشر") + 1
+        self.assertIn("المسمى الوظيفي", headers)          # الوضع الافتراضي: هيكل وظائف
+        manager_col = headers.index("الوظيفة الأعلى") + 1
         managers = [sheet.cell(row=r, column=manager_col).value for r in range(2, 9)]
-        self.assertIn("أحمد السالم", managers)
+        self.assertIn("الرئيس التنفيذي", managers)
+
+    def test_positions_vs_employees(self):
+        """وضع الوظائف (افتراضي) مقابل وضع الموظفين."""
+        _, jobs, _ = convert(self.pptx, os.path.join(self.tmp, "jobs.xlsx"))
+        top = [n for n in jobs if n.parent_id is None][0]
+        self.assertEqual(top.title, "الرئيس التنفيذي")     # الوظيفة هي التسمية
+        self.assertEqual(top.name, "أحمد السالم")          # الشاغل يبقى في عمود منفصل
+        self.assertEqual(top.display_name, "الرئيس التنفيذي")
+        self.assertEqual(jobs[1].path, "الرئيس التنفيذي > المدير المالي")
+
+        xlsx, staff, _ = convert(self.pptx, os.path.join(self.tmp, "staff.xlsx"),
+                                 positions=False)
+        top2 = [n for n in staff if n.parent_id is None][0]
+        self.assertEqual(top2.display_name, "أحمد السالم")
+        self.assertIn("الاسم", [c.value for c in load_workbook(xlsx)[
+            load_workbook(xlsx).sheetnames[0]][1]])
 
     def test_slide_filter(self):
         _, nodes, _ = convert(self.pptx, os.path.join(self.tmp, "s1.xlsx"), slides=[1])

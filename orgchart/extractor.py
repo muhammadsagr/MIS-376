@@ -18,7 +18,7 @@ from pptx import Presentation
 from pptx.util import Emu
 
 from .models import ExtractionResult, OrgNode
-from .textparse import clean_text, normalise_key, parse_box_text
+from .textparse import clean_text, normalise_key, parse_box_text, parse_position_text
 
 # --------------------------------------------------------------------------- #
 # XML namespaces
@@ -74,6 +74,13 @@ class Transform:
                          self.sx * sx, self.sy * sy)
 
 
+def _parse_fields(text: str, smart_text: bool, positions: bool) -> Dict[str, str]:
+    """وضع الوظائف (الافتراضي) أو وضع الموظفين."""
+    if positions:
+        return parse_position_text(text, smart=smart_text)
+    return parse_box_text(text, smart=smart_text)
+
+
 def _q(tag: str) -> str:
     prefix, local = tag.split(":")
     return "{%s}%s" % (NS[prefix], local)
@@ -111,7 +118,8 @@ def _dgm_point_text(pt) -> str:
 
 
 def _extract_smartart(shape, slide_index: int, prefix: str,
-                      result: ExtractionResult, smart_text: bool) -> int:
+                      result: ExtractionResult, smart_text: bool,
+                      positions: bool = True) -> int:
     part = _diagram_data_part(shape)
     if part is None:
         return 0
@@ -132,10 +140,10 @@ def _extract_smartart(shape, slide_index: int, prefix: str,
         text = _dgm_point_text(pt)
         node_id = f"{prefix}sa{added + 1}"
         model_ids[model_id] = node_id
-        fields = parse_box_text(text, smart=smart_text)
+        fields = _parse_fields(text, smart_text, positions)
         result.nodes.append(OrgNode(
             node_id=node_id, slide_index=slide_index, source="smartart",
-            raw_text=text, **fields,
+            raw_text=text, prefer_title=positions, **fields,
         ))
         added += 1
 
@@ -244,11 +252,11 @@ def _collect_shapes(shapes, slide_index: int, prefix: str, tr: Transform,
 
             counter[0] += 1
             node_id = f"{prefix}sh{counter[0]}"
-            fields = parse_box_text(text, smart=opts.smart_text)
+            fields = _parse_fields(text, opts.smart_text, opts.positions)
             result.nodes.append(OrgNode(
                 node_id=node_id, slide_index=slide_index, source="shape",
                 raw_text=text, left=left, top=top, width=width, height=height,
-                **fields,
+                prefer_title=opts.positions, **fields,
             ))
             try:
                 id_map[int(shape.shape_id)] = node_id
@@ -338,13 +346,16 @@ def _edges_from_geometry(nodes: List[OrgNode]) -> List[Tuple[str, str]]:
 HEADER_HINTS = {
     "name": ["name", "employee", "الاسم", "اسم", "الموظف"],
     "title": ["title", "position", "job", "role", "المسمى", "الوظيفة", "المنصب", "الوظيفي"],
+    # في وضع الوظائف قد يُكتب عمود الارتباط باسم «الوظيفة الأعلى» أو «ترتبط بـ»
     "department": ["department", "dept", "division", "unit", "القسم", "الإدارة", "الادارة", "وحدة"],
-    "manager": ["manager", "reports to", "supervisor", "parent", "المدير", "يتبع", "المشرف", "الرئيس المباشر"],
+    "manager": ["manager", "reports to", "supervisor", "parent", "المدير", "يتبع", "المشرف",
+                "الرئيس المباشر", "الوظيفة الأعلى", "ترتبط", "تتبع", "الجهة الأعلى"],
 }
 
 
 def _extract_table(shape, slide_index: int, prefix: str,
-                   result: ExtractionResult, smart_text: bool) -> int:
+                   result: ExtractionResult, smart_text: bool,
+                   positions: bool = True) -> int:
     table = shape.table
     rows = [[clean_text(c.text) for c in row.cells] for row in table.rows]
     if len(rows) < 2:
@@ -359,16 +370,19 @@ def _extract_table(shape, slide_index: int, prefix: str,
                 break
     body = rows[1:]
     if not cols:                       # no recognisable header -> positional
-        cols = {"name": 0}
+        cols = {"title": 0} if positions else {"name": 0}
         if len(rows[0]) > 1:
-            cols["title"] = 1
+            cols["name" if positions else "title"] = 1
         if len(rows[0]) > 2:
             cols["manager"] = 2
         body = rows
+    if positions and "title" not in cols and "name" in cols:
+        cols["title"] = cols.pop("name")   # عمود واحد فقط -> يُعتبر مسمى وظيفي
 
     added = 0
     pending: List[Tuple[str, str]] = []          # (child node id, manager text)
-    by_name: Dict[str, str] = {}
+    by_key: Dict[str, str] = {}                  # المسمى الوظيفي (أو الاسم) -> المعرّف
+    by_alt: Dict[str, str] = {}                  # الحقل الآخر، لمطابقة عمود الارتباط
     for row in body:
         def cell(key: str) -> str:
             idx = cols.get(key)
@@ -381,17 +395,21 @@ def _extract_table(shape, slide_index: int, prefix: str,
         node_id = f"{prefix}tb{added}"
         result.nodes.append(OrgNode(
             node_id=node_id, slide_index=slide_index, source="table",
-            raw_text=" | ".join(v for v in row if v),
+            raw_text=" | ".join(v for v in row if v), prefer_title=positions,
             name=name, title=title, department=cell("department"),
         ))
-        if name:
-            by_name.setdefault(normalise_key(name), node_id)
+        key, alt = ((title, name) if positions else (name, title))
+        if key:
+            by_key.setdefault(normalise_key(key), node_id)
+        if alt:
+            by_alt.setdefault(normalise_key(alt), node_id)
         manager = cell("manager")
         if manager:
             pending.append((node_id, manager))
 
     for child_id, manager in pending:
-        parent_id = by_name.get(normalise_key(manager))
+        wanted = normalise_key(manager)
+        parent_id = by_key.get(wanted) or by_alt.get(wanted)
         if parent_id and parent_id != child_id:
             result.edges.append((parent_id, child_id))
     return added
@@ -403,11 +421,13 @@ def _extract_table(shape, slide_index: int, prefix: str,
 class ExtractOptions:
     def __init__(self, include_titles: bool = False, use_tables: bool = True,
                  smart_text: bool = True, infer_geometry: bool = True,
-                 max_text_len: int = 300, slides: Optional[Iterable[int]] = None):
+                 max_text_len: int = 300, slides: Optional[Iterable[int]] = None,
+                 positions: bool = True):
         self.include_titles = include_titles
         self.use_tables = use_tables
         self.smart_text = smart_text
         self.infer_geometry = infer_geometry
+        self.positions = positions      # True = هيكل وظائف، False = هيكل موظفين
         self.max_text_len = max_text_len
         self.slides = set(slides) if slides else None
         self.slide_width = 0
@@ -433,7 +453,8 @@ def extract_from_presentation(path: str, options: Optional[ExtractOptions] = Non
         for shape in slide.shapes:
             if shape._element.tag == _q("p:graphicFrame") and \
                     shape._element.find(".//" + _q("dgm:relIds")) is not None:
-                _extract_smartart(shape, index, prefix, result, opts.smart_text)
+                _extract_smartart(shape, index, prefix, result, opts.smart_text,
+                                  opts.positions)
 
         # 2) tables
         if opts.use_tables:
@@ -443,7 +464,8 @@ def extract_from_presentation(path: str, options: Optional[ExtractOptions] = Non
                 except Exception:
                     has_table = False
                 if has_table:
-                    _extract_table(shape, index, prefix, result, opts.smart_text)
+                    _extract_table(shape, index, prefix, result, opts.smart_text,
+                                   opts.positions)
 
         # 3) shapes + connectors
         id_map, connectors = _collect_shapes(slide.shapes, index, prefix,
