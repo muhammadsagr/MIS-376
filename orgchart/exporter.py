@@ -24,6 +24,7 @@ COLUMNS_POSITIONS: Sequence[tuple] = (
     ("الشريحة", 9),
     ("عنوان الشريحة", 22),
     ("المستوى", 9),
+    ("الدرجة الوظيفية", 12),
     ("المسمى الوظيفي", 30),
     ("شاغل الوظيفة (إن وُجد)", 22),
     ("القسم / الإدارة", 22),
@@ -42,6 +43,7 @@ COLUMNS_EMPLOYEES: Sequence[tuple] = (
     ("الشريحة", 9),
     ("عنوان الشريحة", 22),
     ("المستوى", 9),
+    ("الدرجة الوظيفية", 12),
     ("الاسم", 26),
     ("المسمى الوظيفي", 26),
     ("القسم / الإدارة", 22),
@@ -79,6 +81,7 @@ def _write_main_sheet(ws: Worksheet, nodes: List[OrgNode], by_id: Dict[str, OrgN
             node.slide_index,
             node.slide_title,
             node.level,
+            node.grade,
             node.title if positions else node.name,
             node.name if positions else node.title,
             node.department,
@@ -96,10 +99,10 @@ def _write_main_sheet(ws: Worksheet, nodes: List[OrgNode], by_id: Dict[str, OrgN
             cell.border = BORDER
             cell.fill = fill
             cell.alignment = Alignment(
-                vertical="center", wrap_text=col_idx in (3, 5, 6, 7, 8, 11, 14),
-                horizontal="center" if col_idx in (1, 2, 4, 9, 10, 12) else "right" if rtl else "left",
+                vertical="center", wrap_text=col_idx in (3, 6, 7, 8, 9, 12, 15),
+                horizontal="center" if col_idx in (1, 2, 4, 5, 10, 11, 13) else "right" if rtl else "left",
             )
-            if col_idx in (5, 6) and node.level == 1:
+            if col_idx in (6, 7) and node.level == 1:
                 cell.font = Font(bold=True)
     if len(nodes):
         ws.auto_filter.ref = f"A1:{get_column_letter(len(columns))}{len(nodes) + 1}"
@@ -108,7 +111,7 @@ def _write_main_sheet(ws: Worksheet, nodes: List[OrgNode], by_id: Dict[str, OrgN
 def _write_tree_sheet(ws: Worksheet, nodes: List[OrgNode], rtl: bool,
                       positions: bool = True) -> None:
     second = ("شاغل الوظيفة", 24) if positions else ("المسمى الوظيفي", 28)
-    cols = (("المستوى", 9), ("الهيكل الشجري", 60), second,
+    cols = (("المستوى", 9), ("الدرجة", 10), ("الهيكل الشجري", 60), second,
             ("القسم / الإدارة", 22),
             ("وظائف تابعة" if positions else "عدد المرؤوسين", 14))
     _style_header(ws, cols, rtl)
@@ -116,15 +119,16 @@ def _write_tree_sheet(ws: Worksheet, nodes: List[OrgNode], rtl: bool,
         indent = max(node.level - 1, 0)
         label = ("└─ " if indent else "") + (node.display_name or "-")
         ws.cell(row=row_idx, column=1, value=node.level).alignment = Alignment(horizontal="center")
-        cell = ws.cell(row=row_idx, column=2, value=label)
+        ws.cell(row=row_idx, column=2, value=node.grade).alignment = Alignment(horizontal="center")
+        cell = ws.cell(row=row_idx, column=3, value=label)
         cell.alignment = Alignment(indent=indent * 2, horizontal="right" if rtl else "left")
         if node.level == 1:
             cell.font = Font(bold=True)
-        ws.cell(row=row_idx, column=3, value=node.name if positions else node.title)
-        ws.cell(row=row_idx, column=4, value=node.department)
-        ws.cell(row=row_idx, column=5, value=node.direct_reports).alignment = \
+        ws.cell(row=row_idx, column=4, value=node.name if positions else node.title)
+        ws.cell(row=row_idx, column=5, value=node.department)
+        ws.cell(row=row_idx, column=6, value=node.direct_reports).alignment = \
             Alignment(horizontal="center")
-        for col in range(1, 6):
+        for col in range(1, 7):
             ws.cell(row=row_idx, column=col).border = BORDER
         if node.level > 1:
             ws.row_dimensions[row_idx].outlineLevel = min(node.level - 1, 7)
@@ -153,6 +157,12 @@ def _write_summary_sheet(ws: Worksheet, nodes: List[OrgNode], result: Extraction
     ]
     for level in sorted(levels):
         rows.append((f"عدد الوظائف في المستوى {level}", levels[level]))
+    grades = {}
+    for node in nodes:
+        if node.grade:
+            grades[node.grade] = grades.get(node.grade, 0) + 1
+    for grade, count in sorted(grades.items()):
+        rows.append((f"عدد الوظائف بالدرجة {grade}", count))
     for dept, count in sorted(departments.items(), key=lambda kv: -kv[1]):
         rows.append((f"القسم: {dept}", count))
     for warning in result.warnings:

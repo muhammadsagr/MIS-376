@@ -27,6 +27,18 @@ INLINE_SEPARATORS = [" - ", " – ", " — ", " | ", " / ", " :: ", " , ", "، "
 
 _WS = re.compile(r"[ \t ]+")
 
+# خلية الدرجة الوظيفية: M5 / M4 / G12 / 39 / 38 ...
+GRADE_RE = re.compile(r"^(?:[A-Za-z\u0621-\u064a]{0,3}[ .\-]?\d{1,3}|[A-Z]{1,3})$")
+
+
+def is_grade(text: str) -> bool:
+    """هل هذا النص خلية درجة وظيفية (رمز قصير) وليس مسمى وظيفيًا؟"""
+    value = (text or "").strip()
+    if not value or len(value) > 6 or "\n" in value:
+        return False
+    return bool(GRADE_RE.match(value))
+
+
 
 def clean_text(value: str) -> str:
     """Normalise whitespace but keep line breaks."""

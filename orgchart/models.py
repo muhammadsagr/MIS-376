@@ -19,6 +19,7 @@ class OrgNode:
 
     name: str = ""
     title: str = ""
+    grade: str = ""                  # الدرجة الوظيفية: M5 / M4 / 39 / 38 ...
     department: str = ""
     extra: str = ""
 
@@ -53,7 +54,10 @@ class OrgNode:
     def display_name(self) -> str:
         primary, secondary = ((self.title, self.name) if self.prefer_title
                               else (self.name, self.title))
-        return primary or secondary or self.raw_text.replace("\n", " ").strip()
+        label = primary or secondary
+        if not label and self.grade:
+            return f"وظيفة بدرجة {self.grade}"       # صف درجة بلا مسمى
+        return label or self.raw_text.replace("\n", " ").strip()
 
 
 @dataclass

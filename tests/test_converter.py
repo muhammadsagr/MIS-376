@@ -21,6 +21,7 @@ from orgchart.extractor import ExtractOptions, _extract_smartart, extract_from_p
 from orgchart.hierarchy import build_hierarchy
 from orgchart.models import ExtractionResult
 from orgchart.textparse import parse_box_text
+from samples.make_grades_sample import build as build_grades
 from samples.make_sample import build as build_sample
 
 DGM = "http://schemas.openxmlformats.org/drawingml/2006/diagram"
@@ -154,6 +155,65 @@ class GeometryFallbackTests(unittest.TestCase):
             self.assertTrue(any("مواقع المربعات" in w for w in result.warnings))
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
+
+
+class GradeLayoutTests(unittest.TestCase):
+    """هيكل وظائف بدرجات: خلية درجة + خلية مسمى، وعمود صفوف تحت كل مدير."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.mkdtemp()
+        cls.pptx = os.path.join(cls.tmp, "grades.pptx")
+        build_grades(cls.pptx)
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmp, ignore_errors=True)
+
+    def test_grade_cells_and_flat_columns(self):
+        _, nodes, _ = convert(self.pptx, os.path.join(self.tmp, "grades.xlsx"))
+        by_title = {n.title: n for n in nodes if n.title}
+
+        gm = by_title["General Manager of Human Capital Services"]
+        self.assertEqual(gm.grade, "M5")                 # دُمجت خلية الدرجة مع المسمى
+        self.assertIsNone(gm.parent_id)
+        self.assertEqual(gm.direct_reports, 3)           # ثلاثة مدراء
+
+        director = by_title["Payroll and Benefits Director"]
+        self.assertEqual(director.grade, "M4")
+        self.assertEqual(director.parent_id, gm.node_id)
+        self.assertEqual(director.direct_reports, 5)     # الصفوف تتبع المدير مباشرة
+        self.assertEqual(max(n.level for n in nodes), 3)  # ولا تتسلسل تحت بعضها
+
+        bare = [n for n in nodes if not n.title and n.grade]
+        self.assertEqual(len(bare), 14)                  # صفوف الدرجات بلا مسمى
+        self.assertTrue(all(n.level == 3 for n in bare))
+        self.assertEqual(bare[0].display_name, f"وظيفة بدرجة {bare[0].grade}")
+
+    def test_grade_table_layout(self):
+        """نفس الهيكل لكنه مرسوم كجداول (عمود درجة + عمود مسمى)."""
+        prs = Presentation()
+        prs.slide_width, prs.slide_height = Cm(33.87), Cm(19.05)
+        slide = prs.slides.add_slide(prs.slide_layouts[6])
+        blocks = [
+            (1.5, [("M4", "Payroll and Benefits Director"), ("39", ""), ("38", ""), ("37", "")]),
+            (14.0, [("M3", "Employees Services Director"), ("38", ""), ("37", "")]),
+        ]
+        for left, rows in blocks:
+            table = slide.shapes.add_table(len(rows), 2, Cm(left), Cm(3.0),
+                                           Cm(11.0), Cm(1.0 * len(rows))).table
+            for r, (grade, title) in enumerate(rows):
+                table.cell(r, 0).text = grade
+                table.cell(r, 1).text = title
+        path = os.path.join(self.tmp, "grade_table.pptx")
+        prs.save(path)
+
+        _, nodes, _ = convert(path, os.path.join(self.tmp, "grade_table.xlsx"))
+        head = [n for n in nodes if n.title == "Payroll and Benefits Director"][0]
+        self.assertEqual(head.grade, "M4")
+        self.assertEqual(head.direct_reports, 3)
+        self.assertEqual([n.grade for n in nodes if n.parent_id == head.node_id],
+                         ["39", "38", "37"])
 
 
 class TableTests(unittest.TestCase):

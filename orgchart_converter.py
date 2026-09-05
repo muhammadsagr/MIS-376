@@ -66,6 +66,7 @@ class OrgNode:
 
     name: str = ""
     title: str = ""
+    grade: str = ""                  # الدرجة الوظيفية: M5 / M4 / 39 / 38 ...
     department: str = ""
     extra: str = ""
 
@@ -100,7 +101,10 @@ class OrgNode:
     def display_name(self) -> str:
         primary, secondary = ((self.title, self.name) if self.prefer_title
                               else (self.name, self.title))
-        return primary or secondary or self.raw_text.replace("\n", " ").strip()
+        label = primary or secondary
+        if not label and self.grade:
+            return f"وظيفة بدرجة {self.grade}"       # صف درجة بلا مسمى
+        return label or self.raw_text.replace("\n", " ").strip()
 
 
 @dataclass
@@ -145,6 +149,18 @@ DEPARTMENT_KEYWORDS = [
 INLINE_SEPARATORS = [" - ", " – ", " — ", " | ", " / ", " :: ", " , ", "، ", "؛ "]
 
 _WS = re.compile(r"[ \t ]+")
+
+# خلية الدرجة الوظيفية: M5 / M4 / G12 / 39 / 38 ...
+GRADE_RE = re.compile(r"^(?:[A-Za-z\u0621-\u064a]{0,3}[ .\-]?\d{1,3}|[A-Z]{1,3})$")
+
+
+def is_grade(text: str) -> bool:
+    """هل هذا النص خلية درجة وظيفية (رمز قصير) وليس مسمى وظيفيًا؟"""
+    value = (text or "").strip()
+    if not value or len(value) > 6 or "\n" in value:
+        return False
+    return bool(GRADE_RE.match(value))
+
 
 
 def clean_text(value: str) -> str:
@@ -539,6 +555,62 @@ def _collect_shapes(shapes, slide_index: int, prefix: str, tr: Transform,
     return id_map, connectors
 
 
+def _merge_grade_cells(nodes: List[OrgNode], id_map: Dict[int, str]) -> List[OrgNode]:
+    """يدمج مربع الدرجة الصغير (M4 / 39) مع مربع المسمى المجاور له في صف واحد.
+
+    هذا هو الشكل الشائع في هياكل الوظائف: خليتان متلاصقتان، اليسرى (أو اليمنى)
+    فيها رمز الدرجة والأخرى فيها المسمى الوظيفي. الصف الذي لا مسمى له يبقى
+    عنصرًا مستقلًا يمثّل وظيفة بدرجة فقط.
+    """
+    boxes = [n for n in nodes if n.left is not None]
+    grades = [n for n in boxes if is_grade(n.raw_text)]
+    if not grades:
+        return nodes
+
+    merged_into: Dict[str, str] = {}
+    dropped = set()
+    for grade_node in grades:
+        g_top = grade_node.top
+        g_bottom = g_top + (grade_node.height or 0)
+        best, best_gap = None, None
+        for other in boxes:
+            if other is grade_node or other.node_id in dropped or is_grade(other.raw_text):
+                continue
+            # نفس الصف تقريبًا: تداخل رأسي كبير
+            overlap = min(g_bottom, other.top + (other.height or 0)) - max(g_top, other.top)
+            if overlap <= 0 or overlap < 0.5 * min(grade_node.height or 1, other.height or 1):
+                continue
+            # ملاصق أفقيًا (يمينه أو يساره)
+            gap = max(other.left - (grade_node.left + (grade_node.width or 0)),
+                      grade_node.left - (other.left + (other.width or 0)))
+            if gap > (grade_node.width or 0) * 1.5:
+                continue
+            if best_gap is None or gap < best_gap:
+                best, best_gap = other, gap
+        if best is None:                     # صف درجة بلا مسمى: وظيفة شاغرة/غير مسمّاة
+            grade_node.grade = grade_node.raw_text.strip()
+            grade_node.title = grade_node.name = ""
+            continue
+
+        best.grade = grade_node.raw_text.strip()
+        left = min(best.left, grade_node.left)
+        right = max(best.left + (best.width or 0), grade_node.left + (grade_node.width or 0))
+        best.left, best.width = left, right - left
+        best.top = min(best.top, grade_node.top)
+        merged_into[grade_node.node_id] = best.node_id
+        dropped.add(grade_node.node_id)
+
+    if not dropped:
+        return nodes
+    for shape_id, node_id in list(id_map.items()):
+        if node_id in merged_into:
+            id_map[shape_id] = merged_into[node_id]
+    for node in nodes:
+        if node.node_id in dropped:
+            continue
+    return [n for n in nodes if n.node_id not in dropped]
+
+
 def _edges_from_connectors(connectors: List[dict], id_map: Dict[int, str],
                            nodes: List[OrgNode]) -> List[Tuple[str, str]]:
     """Turn connectors into parent/child edges (the higher box is the parent)."""
@@ -577,38 +649,82 @@ def _edges_from_connectors(connectors: List[dict], id_map: Dict[int, str],
     return edges
 
 
+def _columns(boxes: List[OrgNode]) -> List[List[OrgNode]]:
+    """تجميع المربعات في أعمدة رأسية (تداخل أفقي كبير)."""
+    columns: List[List[OrgNode]] = []
+    for node in sorted(boxes, key=lambda n: (n.left, n.top)):
+        placed = False
+        for col in columns:
+            ref = col[0]
+            overlap = min(ref.left + (ref.width or 0), node.left + (node.width or 0)) \
+                - max(ref.left, node.left)
+            if overlap > 0 and overlap >= 0.6 * min(ref.width or 1, node.width or 1):
+                col.append(node)
+                placed = True
+                break
+        if not placed:
+            columns.append([node])
+    for col in columns:
+        col.sort(key=lambda n: n.top)
+    return columns
+
+
+def _column_parent(item: OrgNode, above: List[OrgNode]) -> Optional[OrgNode]:
+    """أب العنصر داخل العمود الواحد.
+
+    * إن وُجد فوقه مربع أعرض منه بوضوح (مربع مدير فوق صفوف الدرجات الصغيرة)
+      فهو الأب، وبذلك تصبح كل صفوف العمود أبناءً للمدير لا سلسلة متداخلة.
+    * وإلا فالأب هو المربع الذي يسبقه مباشرة (سلسلة رأسية عادية).
+    """
+    if not above:
+        return None
+    width = item.width or 0
+    for candidate in reversed(above):                 # الأقرب فالأبعد
+        if (candidate.width or 0) > width * 1.25:
+            return candidate
+    return above[-1]
+
+
 def _edges_from_geometry(nodes: List[OrgNode]) -> List[Tuple[str, str]]:
-    """Last resort: rebuild the tree from the position of the boxes on the slide."""
+    """إعادة بناء التسلسل من مواقع المربعات عند غياب خطوط الربط.
+
+    يتعامل مع الشكل الشائع في هياكل الوظائف: عمود من الصفوف أسفل مربع المدير،
+    فكل صفوف العمود تتبع رأس العمود مباشرة (وليست متسلسلة واحدة تحت الأخرى).
+    """
     boxes = [n for n in nodes if n.top is not None]
     if len(boxes) < 2:
         return []
 
-    heights = [n.height or 0 for n in boxes if n.height]
-    band = (sum(heights) / len(heights)) if heights else 100000
-    band = max(band * 0.8, 1)
-
-    rows: List[List[OrgNode]] = []
-    for node in sorted(boxes, key=lambda n: (n.top, n.left)):
-        if rows and abs(node.top - rows[-1][0].top) <= band:
-            rows[-1].append(node)
-        else:
-            rows.append([node])
-
     edges: List[Tuple[str, str]] = []
-    for i in range(1, len(rows)):
-        parents = rows[i - 1]
-        for child in rows[i]:
-            cx = child.left + (child.width or 0) / 2.0
-            best, best_score = None, None
-            for p in parents:
-                px = p.left + (p.width or 0) / 2.0
-                overlap = min(p.left + (p.width or 0), child.left + (child.width or 0)) \
-                    - max(p.left, child.left)
-                score = (-overlap, abs(px - cx))
-                if best_score is None or score < best_score:
-                    best, best_score = p, score
-            if best is not None:
-                edges.append((best.node_id, child.node_id))
+    columns = _columns(boxes)
+    heads = [col[0] for col in columns]
+
+    for col in columns:
+        for idx, item in enumerate(col[1:], start=1):
+            parent = _column_parent(item, col[:idx])
+            if parent is not None:
+                edges.append((parent.node_id, item.node_id))
+
+    def parent_of(head: OrgNode) -> Optional[OrgNode]:
+        gap = (head.height or 0) * 0.4
+        above = [h for h in heads if h is not head and h.top + (h.height or 0) <= head.top + gap]
+        if not above:
+            return None
+        hx = head.left + (head.width or 0) / 2.0
+        best, best_score = None, None
+        for cand in above:
+            overlap = min(cand.left + (cand.width or 0), head.left + (head.width or 0)) \
+                - max(cand.left, head.left)
+            cx = cand.left + (cand.width or 0) / 2.0
+            score = (-max(overlap, 0), head.top - cand.top, abs(cx - hx))
+            if best_score is None or score < best_score:
+                best, best_score = cand, score
+        return best
+
+    for head in sorted(heads, key=lambda n: n.top):
+        parent = parent_of(head)
+        if parent is not None:
+            edges.append((parent.node_id, head.node_id))
     return edges
 
 
@@ -620,9 +736,58 @@ HEADER_HINTS = {
     "title": ["title", "position", "job", "role", "المسمى", "الوظيفة", "المنصب", "الوظيفي"],
     # في وضع الوظائف قد يُكتب عمود الارتباط باسم «الوظيفة الأعلى» أو «ترتبط بـ»
     "department": ["department", "dept", "division", "unit", "القسم", "الإدارة", "الادارة", "وحدة"],
+    "grade": ["grade", "level", "band", "الدرجة", "المرتبة", "المستوى الوظيفي"],
     "manager": ["manager", "reports to", "supervisor", "parent", "المدير", "يتبع", "المشرف",
                 "الرئيس المباشر", "الوظيفة الأعلى", "ترتبط", "تتبع", "الجهة الأعلى"],
 }
+
+
+def _row_geometry(shape, row_idx: int, row_count: int):
+    """إحداثيات تقريبية لصف داخل جدول، لربط الجداول ببعضها لاحقًا."""
+    try:
+        left, top = int(shape.left), int(shape.top)
+        width, height = int(shape.width), int(shape.height)
+    except Exception:
+        return None, None, None, None
+    row_h = int(height / max(row_count, 1))
+    return left, top + row_idx * row_h, width, row_h
+
+
+def _extract_grade_table(shape, rows: List[List[str]], slide_index: int, prefix: str,
+                         result: ExtractionResult) -> int:
+    """جدول وظائف: العمود الأول درجة (M4 / 39) والثاني المسمى.
+
+    الصف الأول هو الوظيفة الأعلى (رأس الجدول) وبقية الصفوف وظائف تابعة له.
+    """
+    added, head_id = 0, None
+    for row_idx, row in enumerate(rows):
+        grade = row[0].strip() if row else ""
+        title = row[1].strip() if len(row) > 1 else ""
+        extra = " | ".join(v for v in row[2:] if v)
+        if not grade and not title:
+            continue
+        added += 1
+        node_id = f"{prefix}gt{len(result.nodes) + 1}"
+        left, top, width, height = _row_geometry(shape, row_idx, len(rows))
+        result.nodes.append(OrgNode(
+            node_id=node_id, slide_index=slide_index, source="table",
+            raw_text=" | ".join(v for v in row if v), prefer_title=True,
+            title=title, grade=grade, extra=extra,
+            left=left, top=top, width=width, height=height,
+        ))
+        if head_id is None:
+            head_id = node_id
+        else:
+            result.edges.append((head_id, node_id))
+    return added
+
+
+def _looks_like_grade_table(rows: List[List[str]]) -> bool:
+    first = [r[0].strip() for r in rows if r and r[0].strip()]
+    if len(rows) < 2 or len(rows[0]) < 2 or not first:
+        return False
+    hits = sum(1 for value in first if is_grade(value))
+    return hits >= max(2, int(len(first) * 0.6))
 
 
 def _extract_table(shape, slide_index: int, prefix: str,
@@ -633,6 +798,9 @@ def _extract_table(shape, slide_index: int, prefix: str,
     if len(rows) < 2:
         return 0
 
+    if positions and _looks_like_grade_table(rows):
+        return _extract_grade_table(shape, rows, slide_index, prefix, result)
+
     header = [h.lower() for h in rows[0]]
     cols: Dict[str, int] = {}
     for key, hints in HEADER_HINTS.items():
@@ -641,13 +809,14 @@ def _extract_table(shape, slide_index: int, prefix: str,
                 cols.setdefault(key, idx)
                 break
     body = rows[1:]
+    first_row = 1
     if not cols:                       # no recognisable header -> positional
         cols = {"title": 0} if positions else {"name": 0}
         if len(rows[0]) > 1:
             cols["name" if positions else "title"] = 1
         if len(rows[0]) > 2:
             cols["manager"] = 2
-        body = rows
+        body, first_row = rows, 0
     if positions and "title" not in cols and "name" in cols:
         cols["title"] = cols.pop("name")   # عمود واحد فقط -> يُعتبر مسمى وظيفي
 
@@ -655,7 +824,7 @@ def _extract_table(shape, slide_index: int, prefix: str,
     pending: List[Tuple[str, str]] = []          # (child node id, manager text)
     by_key: Dict[str, str] = {}                  # المسمى الوظيفي (أو الاسم) -> المعرّف
     by_alt: Dict[str, str] = {}                  # الحقل الآخر، لمطابقة عمود الارتباط
-    for row in body:
+    for offset, row in enumerate(body):
         def cell(key: str) -> str:
             idx = cols.get(key)
             return row[idx] if idx is not None and idx < len(row) else ""
@@ -665,10 +834,12 @@ def _extract_table(shape, slide_index: int, prefix: str,
             continue
         added += 1
         node_id = f"{prefix}tb{added}"
+        left, top, width, height = _row_geometry(shape, first_row + offset, len(rows))
         result.nodes.append(OrgNode(
             node_id=node_id, slide_index=slide_index, source="table",
             raw_text=" | ".join(v for v in row if v), prefer_title=positions,
-            name=name, title=title, department=cell("department"),
+            name=name, title=title, grade=cell("grade"), department=cell("department"),
+            left=left, top=top, width=width, height=height,
         ))
         key, alt = ((title, name) if positions else (name, title))
         if key:
@@ -694,12 +865,13 @@ class ExtractOptions:
     def __init__(self, include_titles: bool = False, use_tables: bool = True,
                  smart_text: bool = True, infer_geometry: bool = True,
                  max_text_len: int = 300, slides: Optional[Iterable[int]] = None,
-                 positions: bool = True):
+                 positions: bool = True, merge_grades: bool = True):
         self.include_titles = include_titles
         self.use_tables = use_tables
         self.smart_text = smart_text
         self.infer_geometry = infer_geometry
         self.positions = positions      # True = هيكل وظائف، False = هيكل موظفين
+        self.merge_grades = merge_grades  # دمج خلية الدرجة مع خلية المسمى
         self.max_text_len = max_text_len
         self.slides = set(slides) if slides else None
         self.slide_width = 0
@@ -743,9 +915,18 @@ def extract_from_presentation(path: str, options: Optional[ExtractOptions] = Non
         id_map, connectors = _collect_shapes(slide.shapes, index, prefix,
                                              Transform(), result, opts)
         shape_nodes = [n for n in result.nodes[before:] if n.source == "shape"]
+        if opts.merge_grades and opts.positions:
+            kept = _merge_grade_cells(shape_nodes, id_map)
+            if len(kept) != len(shape_nodes):
+                keep_ids = {n.node_id for n in kept}
+                result.nodes = [n for n in result.nodes
+                                if n.source != "shape" or n.node_id in keep_ids
+                                or n not in shape_nodes]
+                shape_nodes = kept
         edges = _edges_from_connectors(connectors, id_map, shape_nodes)
-        if not edges and opts.infer_geometry and len(shape_nodes) > 1:
-            edges = _edges_from_geometry(shape_nodes)
+        if not edges and opts.infer_geometry:
+            pool = [n for n in result.nodes[before:] if n.top is not None]
+            edges = _edges_from_geometry(pool) if len(pool) > 1 else []
             if edges:
                 result.warnings.append(
                     f"الشريحة {index}: لا توجد روابط (connectors) بين المربعات، "
@@ -878,6 +1059,7 @@ COLUMNS_POSITIONS: Sequence[tuple] = (
     ("الشريحة", 9),
     ("عنوان الشريحة", 22),
     ("المستوى", 9),
+    ("الدرجة الوظيفية", 12),
     ("المسمى الوظيفي", 30),
     ("شاغل الوظيفة (إن وُجد)", 22),
     ("القسم / الإدارة", 22),
@@ -896,6 +1078,7 @@ COLUMNS_EMPLOYEES: Sequence[tuple] = (
     ("الشريحة", 9),
     ("عنوان الشريحة", 22),
     ("المستوى", 9),
+    ("الدرجة الوظيفية", 12),
     ("الاسم", 26),
     ("المسمى الوظيفي", 26),
     ("القسم / الإدارة", 22),
@@ -933,6 +1116,7 @@ def _write_main_sheet(ws: Worksheet, nodes: List[OrgNode], by_id: Dict[str, OrgN
             node.slide_index,
             node.slide_title,
             node.level,
+            node.grade,
             node.title if positions else node.name,
             node.name if positions else node.title,
             node.department,
@@ -950,10 +1134,10 @@ def _write_main_sheet(ws: Worksheet, nodes: List[OrgNode], by_id: Dict[str, OrgN
             cell.border = BORDER
             cell.fill = fill
             cell.alignment = Alignment(
-                vertical="center", wrap_text=col_idx in (3, 5, 6, 7, 8, 11, 14),
-                horizontal="center" if col_idx in (1, 2, 4, 9, 10, 12) else "right" if rtl else "left",
+                vertical="center", wrap_text=col_idx in (3, 6, 7, 8, 9, 12, 15),
+                horizontal="center" if col_idx in (1, 2, 4, 5, 10, 11, 13) else "right" if rtl else "left",
             )
-            if col_idx in (5, 6) and node.level == 1:
+            if col_idx in (6, 7) and node.level == 1:
                 cell.font = Font(bold=True)
     if len(nodes):
         ws.auto_filter.ref = f"A1:{get_column_letter(len(columns))}{len(nodes) + 1}"
@@ -962,7 +1146,7 @@ def _write_main_sheet(ws: Worksheet, nodes: List[OrgNode], by_id: Dict[str, OrgN
 def _write_tree_sheet(ws: Worksheet, nodes: List[OrgNode], rtl: bool,
                       positions: bool = True) -> None:
     second = ("شاغل الوظيفة", 24) if positions else ("المسمى الوظيفي", 28)
-    cols = (("المستوى", 9), ("الهيكل الشجري", 60), second,
+    cols = (("المستوى", 9), ("الدرجة", 10), ("الهيكل الشجري", 60), second,
             ("القسم / الإدارة", 22),
             ("وظائف تابعة" if positions else "عدد المرؤوسين", 14))
     _style_header(ws, cols, rtl)
@@ -970,15 +1154,16 @@ def _write_tree_sheet(ws: Worksheet, nodes: List[OrgNode], rtl: bool,
         indent = max(node.level - 1, 0)
         label = ("└─ " if indent else "") + (node.display_name or "-")
         ws.cell(row=row_idx, column=1, value=node.level).alignment = Alignment(horizontal="center")
-        cell = ws.cell(row=row_idx, column=2, value=label)
+        ws.cell(row=row_idx, column=2, value=node.grade).alignment = Alignment(horizontal="center")
+        cell = ws.cell(row=row_idx, column=3, value=label)
         cell.alignment = Alignment(indent=indent * 2, horizontal="right" if rtl else "left")
         if node.level == 1:
             cell.font = Font(bold=True)
-        ws.cell(row=row_idx, column=3, value=node.name if positions else node.title)
-        ws.cell(row=row_idx, column=4, value=node.department)
-        ws.cell(row=row_idx, column=5, value=node.direct_reports).alignment = \
+        ws.cell(row=row_idx, column=4, value=node.name if positions else node.title)
+        ws.cell(row=row_idx, column=5, value=node.department)
+        ws.cell(row=row_idx, column=6, value=node.direct_reports).alignment = \
             Alignment(horizontal="center")
-        for col in range(1, 6):
+        for col in range(1, 7):
             ws.cell(row=row_idx, column=col).border = BORDER
         if node.level > 1:
             ws.row_dimensions[row_idx].outlineLevel = min(node.level - 1, 7)
@@ -1007,6 +1192,12 @@ def _write_summary_sheet(ws: Worksheet, nodes: List[OrgNode], result: Extraction
     ]
     for level in sorted(levels):
         rows.append((f"عدد الوظائف في المستوى {level}", levels[level]))
+    grades = {}
+    for node in nodes:
+        if node.grade:
+            grades[node.grade] = grades.get(node.grade, 0) + 1
+    for grade, count in sorted(grades.items()):
+        rows.append((f"عدد الوظائف بالدرجة {grade}", count))
     for dept, count in sorted(departments.items(), key=lambda kv: -kv[1]):
         rows.append((f"القسم: {dept}", count))
     for warning in result.warnings:
