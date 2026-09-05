@@ -928,9 +928,9 @@ def export_to_excel(nodes: List[OrgNode], result: ExtractionResult, output_path:
     wb = Workbook()
     by_id = {n.node_id: n for n in nodes}
 
-    main = wb.active
-    main.title = "الهيكل الوظيفي"
-    _write_main_sheet(main, nodes, by_id, rtl)
+    main_ws = wb.active
+    main_ws.title = "الهيكل الوظيفي"
+    _write_main_sheet(main_ws, nodes, by_id, rtl)
 
     _write_tree_sheet(wb.create_sheet("العرض الشجري"), nodes, rtl)
     _write_summary_sheet(wb.create_sheet("ملخص وتقرير"), nodes, result, rtl)
